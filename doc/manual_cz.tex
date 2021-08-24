@@ -1,0 +1,326 @@
+\documentclass{article}
+\usepackage{graphicx}
+
+\begin{document}
+
+\title{CMP Rádce \\ Instalační příručka klasifikátoru}
+%\author{Author's Name}
+
+\maketitle
+
+\begin{abstract}
+Tento dokument slouží jako instalační příručka a manuál klasifikátoru pro CMP Rádce. Obsahuje pokyny pro nasazení webové služby včetně inicializace prázdné databáze. Dále popisuje REST API rozhraní webové služby a způsob importu počátečních dat pro trénink klasifikátoru.
+\end{abstract}
+
+\section{Nasazení klasifikátoru na serveru}
+V této části jsou popsány kroky nutné pro úspěšné nasazení klasifikátoru. Postup je testován na systému Ubuntu 20.04, ale měl by být dostatečně generický. Předpokladem je instalace Java JRE ve verzi min. 8, raději však 11 (testováno na OpenJDK 11 64bit) a MySQL (testováno na verzi 8).
+
+\subsection{Příprava databáze}
+\label{subsec:db}
+
+V podsložce \textit{/data/db\_scripts} existuje soubor \textit{ddl.sql}, který postačí spustit nad prázdnou instancí databáze. Tento skript vytvoří nové schéma \textit{cmpradce}.
+
+Co skript neobsahuje je \textbf{tvorba nového uživatele} pro tuto databázi - tento krok je nutné zajistit manuálně. Uživatel by měl mít práva pro běžné CRUD operace s daty.
+
+\subsection{Spuštění webové služby}
+
+Webová služba je dodána jako standalone aplikace obsahující i samotný webový server. Pro úspěšné spuštění je potřeba pouze nainstalované JRE. Spuštění probíhá následovným příkazem:
+
+\begin{verbatim}
+java -jar cmpradce.jar
+\end{verbatim}
+
+Ve výchozím stavu bez argumentů server nenastartuje. K tomut potřebuje přiložený konfigurační soubor \textit{application.properties} na stejné úrovni, jako samotný JAR soubor webové služby. S přiloženým konfiguračním souborem server startuje na portu 5555 a pokouší se připojit na testovací databázi (\textit{127.0.0.1/cmpradce} s uživ. jménem \textit{cmpradce} a heslem \textit{cmpradce}), která s největší pravděpodobností nebude na cílovém systému existovat (a zejména kombinace uživ. jména a hesla ani není takto doporučována). Proto je potřeba tyto argumenty (port a argumenty pro připojení k databázi) nastavit úpravou konfiguračního souboru.
+
+Pro úspěšné nastartování webové služby je potřeba běžící a připravená databáze - viz krok \ref{subsec:db}.
+
+\section{Počáteční trénink klasifikátoru}
+
+Pokud máte vlastní tréninková data, je možné tento krok přeskočit. V opačném případě doporučujeme po prvním spuštění provést prvotní trénink klasifikátoru s využitím dat získaných z časové osy a dobového stavu diskuzního fóra. K tomu lze použít data z podložky \textit{/data/train} předané formou cesty na disku jako argument pro REST endpoint \textit{/importData} (více v části \ref{subsec:dataimport}). Klasifikátor lze následně "dotrénovat" pomocí inkrementálních synchronizací.
+
+%\begin{figure}
+%    \centering
+%    \includegraphics[width=3.0in]{myfigure}
+%    \caption{Simulation Results}
+%    \label{simulationfigure}
+%\end{figure}
+
+\section{Vlastní Stop slova}
+
+Klasifikátor ve výchozím stavu pracuje se zabudovaným (v praxi dosti omezeným) seznamem stop slov. Externě lze dodat seznam nový skrze konfigurační soubor \textit{application.properties} a klíč \texttt{stopwords.path} mající jako hodnotu cestu k souboru obsahující stop slova (jedno na řádek) - např. takto:
+
+\begin{verbatim}
+stopwords.path=stopwords.lst
+\end{verbatim}
+
+Jako vzor lze použít dodaný \textit{stopwords.lst}. Že jsou stop slova z externího souboru úspěšně načtena si lze všimnout z logu serveru během procesu učení (hledejte \textit{StopWordsList}).
+
+\subsection{Změna stop slov po natrénování}
+
+V praxi může nastat případ, kdy po natrénování zjistíme, že nalezená klíčová slova jednotlivých kategorií obsahují také stop slova, která nebyla dříve na seznamu. Tento nežádoucí stav lze vyřešit rozšířením seznamu stop slov a kompletním přetrénováním klasifikátoru.
+
+\textbf{Upozornění:} berte prosím v potaz, že původní tréninková sada se může lišit od té, nad kterou byl aktuální klasifikátor reálně natrénován, pokud již byla provedena synchronizace dat (dotrénování novými daty). Kompletní sadu tréninkových dokumentů je tedy potřeba před přetrénováním s novými stop slovy aktualizovat. Nejsnáze toho lze dosáhnout exportem dokumentů z databáze (obsahuje všechny dokumenty, které kdy byly použity pro trénink klasifikátoru). K tomuto existuje REST endpoint popsaný v části \ref{subsec:export}. Postup je tedy následující:
+
+\begin{enumerate}
+	\item Export všech dokumentů skrze endpoint popsaný v \ref{subsec:export}.
+	\item Zastavení webové služby.
+	\item Spuštění skriptu \textit{truncate\_all\_tables.sql} z podsložky \textit{/data/db\_scripts} nad databází klasifikátoru (příp. je možné množinu vyprázdněných tabulek upravit s respektem ke vzájemným vazbám).
+	\item Úprava souboru se stop slovy.
+	\item Spuštění webové služby.
+	\item Natrénování klasifikátoru dle \ref{subsec:dataimport}, kde cesta k trénovací sadě bude shodná s cestou, kam byly výše data vyexportována.
+\end{enumerate}
+
+\section{Popis REST API}
+
+V této části popisujeme detailněji jednotlivé REST endpointy a jejich argumenty.
+
+\subsection{Počáteční import dat: \texttt{/rest/importData/\{loadKeyWords\}}}
+\label{subsec:dataimport}
+Slouží pro import dat z dané cesty na disku. Data jsou očekávána v následující struktuře:
+
+\begin{itemize}
+	\item Kategorie 1
+		\begin{itemize}
+			\item Textový dokument 1 
+			\item Textový dokument 2
+		\end{itemize}
+	\item Kategorie 2
+		\begin{itemize}
+			\item Textový dokument 3 
+			\item Textový dokument 4
+			\item Textový dokument 5
+		\end{itemize}
+\end{itemize}
+
+Ukázku dat lze najít v podložce \textit{/data/train}.
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda: POST
+	\item Parametr \textit{loadKeyWords}: říká, zda mají být při importu detekována také klíčová slova kategorií (doporučeno TRUE).
+	\item Konzumuje: Plain text (cesta na disku, ze které data importovat).
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+HTTP 200, pokud import proběhl v pořádku.
+
+\subsection{Výpis kategorií: \texttt{/rest/categories}}
+
+Výpis aktuálně naimportovaných kategorií.
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda: GET
+	\item Produkuje JSON
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+Ukázka:
+
+\begin{verbatim}
+{
+   "categories":[
+      {
+         "name":"4 - Období domácí péče (život po CMP)",
+         "id":1
+      },
+      {
+         "name":"1 - Období šoku (první setkání s CMP)",
+         "id":2
+      },
+      {
+         "name":"2 - Období akutní péče (neurologické oddělení městské nemocnice)",
+         "id":3
+      },
+      {
+         "name":"3 - Období následné péče (rehabilitační ústav)",
+         "id":4
+      }
+   ]
+}
+\end{verbatim}
+
+\subsection{Klíčová slova pro jednotlivé kategorie: \texttt{/rest/keywords-per-categories}}
+
+Výpis aktuálně identifikovaných klíčových slov pro aktuálně naimportované kategorie. Mapování na kategorie lze provést přes atribut \textit{categoryId} korespondující s atributem \textit{id} u výpisu kategorií.
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda: GET
+	\item Produkuje JSON
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+Ukázka:
+
+\begin{verbatim}
+{
+   "keyWordsPerCategories":[
+      {
+         "keyWords":[
+            "jí",
+            "charity",
+            "bytě",
+            "maminky",
+            "sem"
+         ],
+         "categoryId":1
+      },
+      {
+         "keyWords":[
+            "volali",
+            "odváželi",
+            "jdu",
+            "jedou",
+            "nezhroutit"
+         ],
+         "categoryId":2
+      },
+      {
+         "keyWords":[
+            "tohle",
+            "vydržet",
+            "poradit",
+            "neochoty",
+            "pevně"
+         ],
+         "categoryId":3
+      },
+      {
+         "keyWords":[
+            "stres",
+            "zařizuje",
+            "tipy",
+            "zabezpečila",
+            "jakám"
+         ],
+         "categoryId":4
+      }
+   ]
+}
+\end{verbatim}
+
+\subsection{Predikce kategorie: \texttt{/rest/categorize}}
+
+Provede predikci kategorie (klasifikaci) daného textu.
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda: POST
+	\item Konzumuje \textit{application/octet-stream} (text ke klasifikaci)
+	\item Produkuje JSON
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+Ukázka:
+
+\begin{verbatim}
+{
+   "categoryName":"4 - Období domácí péče (život po CMP)",
+   "categoryId":1
+}
+\end{verbatim}
+
+\subsection{Datum poslední synchronizace: \texttt{/rest/lastSync}}
+
+Vrací datum poslední synchronizace, nebo 0, pokud žádná ještě neproběhla.
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda: GET
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+"0", pokud ještě v minulosti synchronizace neproběhla, nebo timestamp poslední (úspěšné) synchronizace.
+
+\subsection{Synchronizace dat: \texttt{/rest/syncData}}
+
+Provede synchronizaci dat na základě nových dat dodaných ve formě JSON objektu. Ten obsahuje pole dokumentů (struktura níže) s jejich externím ID (\textit{postId}), textem (\textit{postContent}) a kategorií (ID a název - \textit{categoryId} a \textit{categoryName}). Atributy \textit{postContent} a \textit{categoryName} jsou povinné. ID dokumentu a kategorie mohou chybět (kategorie je následně dohledávána na základě jména - v případě, že je ID kategorie přiloženo, je kontrolována shoda s uloženou hodnotou). V případě, že synchronizátor najde pod ID dokumentu již existující dokument, aktualizuje jeho obsah. V případě, že synchronizátor nenalezne danou kategorii, vytvoří ji. Na závěr dojde k přepočítání klíčových slov pro jednotlivé kategorie. Synchronizace běží asynchronně.
+
+Ukázka vstupního JSON objektu:
+
+\begin{verbatim}
+{
+   "objects":[
+      {
+         "_comment":"aktualizuje dokument s externim ID 999, nebo vytvori novy s timto ID",
+         "postId":999,
+         "postContent":"Obsah",
+         "categoryId":4,
+         "categoryName":"3 - Období následné péče (rehabilitační ústav)"
+      },
+      {
+         "_comment":"vlozi novy dokument a necha DB vygenerovat vlastni ID",
+         "postContent":"Obsah",
+         "categoryId":4,
+         "categoryName":"3 - Období následné péče (rehabilitační ústav)"
+      },
+      {
+         "_comment":"ID kategorie bude dohledavano dle nazvu, nebo vytvori novou",
+         "postContent":"Obsah",
+         "categoryName":"3 - Období následné péče (rehabilitační ústav)"
+      }
+   ]
+}
+\end{verbatim}
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda POST
+	\item Konzumuje \textit{application/json} (nová data k synchronizaci - viz výše)
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+Vrací vždy HTTP 200, pokud nebyl synchronizátor uzamčen. Jinak HTTP 503 při uzamčení předchozím pokusem (tzn. stále běží poslední synchronizace, příp. zhavarovala - detaily v logu serveru a je nutný restart služby).
+
+\subsection{Export dat: \texttt{/rest/export}}
+\label{subsec:export}
+
+Provede export všech kategorií a jejich dokumentů z databáze na definované místo ve struktuře vhodné pro opětovný import. Cílové místo, kam budou data exportována, určuje zaslaný JSON objekt, resp. atribut \textit{destination}. Webová služba smaže veškerý již příp. existující obsah v daném umístění! 
+
+Ukázka vstupního JSON objektu:
+
+\begin{verbatim}
+{
+   "destination":"/tmp/cmpradcetrain"
+}
+\end{verbatim}
+
+\subsubsection{Parametry}
+
+\begin{itemize}
+	\item Metoda POST
+	\item Konzumuje \textit{application/json} (JSON objekt s destinací - viz výše)
+\end{itemize}
+
+\subsubsection{Odpověď}
+
+Vrací vždy HTTP 200, pokud nebyl exportér uzamčen. Jinak HTTP 503 při uzamčení předchozím pokusem (tzn. stále běží poslední export, příp. zhavaroval - detaily v logu serveru a je nutný restart služby).
+
+
+\appendix
+
+\section{Tréninková data z CMP Rádce - úprava tříd}
+
+Pokud bude potřeba upravit třídy v dodané tréninkové sadě, lze k tomu využít následující postup:
+
+\begin{enumerate}
+	\item V podsložce \textit{data} existuje soubor \textit{cmp-radce.cz.xlsx} - jde o export původních dat z CMP Rádce a k nim přiřazené kategorie, které postačí upravit v Excelu.
+	\item V podsložce \textit{data} existuje Python 3 skript \textit{cmp-radce.cz-export-xlsx.py}, který vyexportuje upravený XLSX soubor \textit{cmp-radce.cz.xlsx} do podadresáře \textit{MODIFIED}. Sem je následně možné nasměrovat klasifikátor pro natrénování (viz sekce \ref{subsec:dataimport}).
+\end{enumerate}
+
+
+
+\end{document}
